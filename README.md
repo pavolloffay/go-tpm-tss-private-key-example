@@ -18,6 +18,89 @@
 * Assign the TPM-backed crypto.Signer object to the PrivateKey field.
 * Set RootCAs to specify the CAs trusted for verifying the server's certificate (or use InsecureSkipVerify only for testing).
 
+## TPM commands for wrapped key
+
+In the context of a TPM, a "wrapped key" refers to a cryptographic key (its sensitive private portion) that has been encrypted using another key, typically a "parent" key that resides within or is managed by the TPM. This allows the wrapped key to be stored securely outside the TPM (e.g., on disk) because it can only be decrypted (unwrapped) and used by the TPM itself, under the correct conditions and with the correct parent key.
+
+Here are the key TPM 2.0 commands involved in managing wrapped keys:
+
+1. TPM2_Create / TPM2_CreateLoaded:
+Purpose: To create a new key object (like an RSA or ECC key pair, or a symmetric key) under a specified parent key.
+Relevance to Wrapping: When TPM2_Create successfully generates a new key pair, it returns the public portion of the key directly. Crucially, it returns the private portion encrypted ("wrapped") by the public part of the specified parent key. This wrapped private blob is what you would typically store externally.
+TPM2_CreateLoaded does the same but also loads the newly created key into the TPM immediately, returning a handle for use, in addition to the wrapped private/public parts.
+
+2. TPM2_Load:
+Purpose: To load a key (that was previously created using TPM2_Create) back into the TPM using its parent.
+Relevance to Wrapping: This command takes the public portion and the wrapped private portion of a key, along with the handle of its parent key. The TPM uses the parent key (internally) to decrypt ("unwrap") the private portion and load the key into one of its volatile slots. If successful, it returns a handle that can be used in subsequent cryptographic operations (like signing or decryption). This is the primary way to make an externally stored wrapped key usable again.
+
+3. TPM2_Import:
+Purpose: To import a key into the TPM that was either generated externally or duplicated using TPM2_Duplicate.
+Relevance to Wrapping: This command is used when the key's private portion is wrapped differently than the standard output of TPM2_Create. Specifically, when using TPM2_Duplicate, the private key is encrypted with a symmetric key, which itself is wrapped by the new parent's public key. TPM2_Import takes these components (public key, duplicated private blob, encryption key, optional symmetric algorithm definition) and the new parent handle to unwrap and load the key.
+
+4. TPM2_Duplicate:
+Purpose: To "re-wrap" an existing key (that is already loaded in the TPM) under a different parent key. This is often used for migrating keys between TPMs or between different hierarchies within the same TPM.
+Relevance to Wrapping: It takes the handle of the key to be duplicated and the handle of the new parent. It encrypts (wraps) the private portion of the target key, typically using a symmetric key provided (or generated internally), and then encrypts that symmetric key using the public portion of the new parent. It outputs these wrapped components, ready to be imported using TPM2_Import under the new parent.
+
+5. TPM2_LoadExternal:
+Purpose: To load a public key, or potentially a key where the private portion is not TPM-wrapped (e.g., a key from a file without TPM protection), into the TPM.
+Relevance to Wrapping: This is generally not used for standard wrapped keys protected by TPM parents. It's more for bringing external public keys into the TPM for verification tasks or potentially for keys managed outside the TPM's wrapping mechanisms.
+
+## TPM how to sign with wrapped key
+
+1. Load the Wrapped Key: Provide the wrapped private key blob, its corresponding public key, and identify its parent key to the TPM. The TPM uses the parent key (which must already be loaded or available) to decrypt (unwrap) the private key and load it into a temporary, secure slot. The TPM returns a handle (a reference) to this now-active key.
+2. Perform the Signing Operation: Instruct the TPM to use the handle of the loaded key to sign the data (or typically, the hash of the data) you provide, using a specified signing scheme (e.g., RSASSA-PKCS1-v1_5, ECDSA). The TPM performs the calculation internally using the unwrapped private key.
+3. Receive the Signature: The TPM returns the resulting digital signature. The private key itself never leaves the TPM boundary during this process.
+4. (Optional but Recommended) Flush the Key: Release the key handle and clear the key from the TPM's active memory slot to free up resources.
+
+
+Let's assume you have:
+
+* parent.ctx: The context file for the parent key (already loaded or made persistent).
+* mykey.pub: The public part of the key you want to use for signing.
+* mykey.priv: The wrapped private part of the key (output from tpm2_create).
+* data_to_sign.txt: The file containing the data you want to sign.
+Here's how you would typically proceed:
+
+1. Load the Wrapped Key:
+
+Use tpm2_load to load the public (mykey.pub) and wrapped private (mykey.priv) parts under the parent key (parent.ctx).
+This command unwraps the private key inside the TPM and saves the context (including the handle) of the now-loaded key to an output file (e.g., mykey.ctx).
+Bash
+
+```bash
+# Command syntax: tpm2_load -C <parent_context> -u <public_key_file> -r <private_key_file> -c <output_key_context_file>
+tpm2_load -C parent.ctx -u mykey.pub -r mykey.priv -c mykey.ctx
+Note: If the key has an authorization password, you'll need to provide it using -p or other mechanisms during loading and signing.
+```
+
+2. Sign the Data:
+Use tpm2_sign with the loaded key context (mykey.ctx).
+Provide the data file (data_to_sign.txt). The tool usually hashes the data internally first before passing the hash to the TPM for signing (check the tool's documentation for specifics or use -d for pre-hashed digests).
+Specify the output file for the signature (signature.bin).
+You might need to specify the signing scheme (e.g., -g sha256 -s rsassa).
+Bash
+
+```bash
+# Command syntax: tpm2_sign -c <key_context_file> -g <hash_algorithm> -s <signing_scheme> -o <output_signature_file> <input_data_file>
+# Example for RSA key:
+tpm2_sign -c mykey.ctx -g sha256 -s rsassa -o signature.bin data_to_sign.txt
+
+
+# Example for ECC key (scheme often determined automatically or use appropriate flag):
+# tpm2_sign -c mykey.ctx -g sha256 -o signature.bin data_to_sign.txt
+```
+
+3. Flush the Key Context (Optional but Recommended):
+Use tpm2_flushcontext to remove the key from the TPM's active memory.
+Bash
+
+```bash
+# Command syntax: tpm2_flushcontext <context_file_to_flush OR handle>
+tpm2_flushcontext mykey.ctx
+# Alternatively, if you know the handle (e.g., 0x81000001): tpm2_flushcontext 0x81000001
+After flushing, the mykey.ctx file is no longer valid. You would need to run tpm2_load again to use the key.
+```
+
 ## Generate certificates
 
 The certificates are generated with openssl 3.x and the tpm2 provider - https://github.com/tpm2-software/tpm2-openssl.
