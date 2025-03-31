@@ -62,7 +62,7 @@ func main() {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		RootCAs:      caCertPool,
-		ServerName:   "localhost",
+		//ServerName:   "localhost",
 	}
 
 	httpTransport := &http.Transport{
